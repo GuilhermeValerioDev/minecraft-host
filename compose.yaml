@@ -1,0 +1,41 @@
+services:
+  minecraft:
+    image: itzg/minecraft-server:latest
+    container_name: mc-${INSTANCE}
+    hostname: mc-${INSTANCE}
+    restart: unless-stopped
+
+    ports:
+      - "25565:25565"
+      - "25575:25575"
+      - "8100:8100"
+
+    env_file:
+      - .env
+
+    environment:
+      EULA: "TRUE"
+      TYPE: ${TYPE}
+      VERSION: ${VERSION}
+      MEMORY: ${MEMORY}
+      TZ: ${TZ}
+      ENABLE_RCON: "true"
+      RCON_PASSWORD: ${RCON_PASSWORD}
+      
+   
+    volumes:
+      - ./instances/${INSTANCE}/server:/data:Z
+
+    stdin_open: true
+    tty: true
+
+    healthcheck:
+      test: ["CMD", "/usr/bin/mc-health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  default:
+    name: minecraft-network
+

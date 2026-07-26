@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+
+set -e
+
+cd "$(dirname "$0")/.."
+
+if command -v podman >/dev/null 2>&1; then
+    ENGINE="podman"
+elif command -v docker >/dev/null 2>&1; then
+    ENGINE="docker"
+else
+    echo "❌ Neither Podman nor Docker is installed."
+    exit 1
+fi
+
+if [[ ! -f ".env" ]]; then
+    echo "❌ .env not found."
+    exit 1
+fi
+
+source .env
+
+CONTAINER="mc-${INSTANCE}"
+
+restore_ownership() {
+    echo "🔧 Restoring file ownership..."
+
+    sudo chown -R "$USER:$USER" "./instances/$INSTANCE/server"
+
+    echo "✅ Ownership restored."
+}
+
+usage() {
+cat <<EOF
+Minecraft Host CLI
+
+Usage:
+  mc start
+  mc stop
+  mc restart
+  mc status
+  mc logs
+  mc console
+  mc cmd "<command>"
+
+Examples:
+  mc start
+  mc logs
+  mc console
+  mc cmd "say Hello everyone!"
+  mc cmd "save-all"
+EOF
+}
+
+case "${1:-}" in
+    start)
+        echo "🚀 Starting $INSTANCE..."
+        $ENGINE compose up -d
+        ;;
+
+    stop)
+        echo "🛑 Stopping $INSTANCE..."
+        $ENGINE compose down
+
+        if ! $ENGINE ps --format "{{.Names}}" | grep -qx "$CONTAINER"; then
+            restore_ownership
+        else
+            echo "⚠️ Container still appears to be running; skipping ownership restore."
+        fi
+        ;;
+
+    restart)
+        echo "🔄 Restarting $INSTANCE..."
+        $ENGINE compose down
+
+        if ! $ENGINE ps --format "{{.Names}}" | grep -qx "$CONTAINER"; then
+            restore_ownership
+        else
+            echo "⚠️ Container still appears to be running; skipping ownership restore."
+        fi
+
+        $ENGINE compose up -d
+        ;;
+
+    status)
+        $ENGINE ps --filter "name=$CONTAINER"
+        ;;
+
+    logs)
+        $ENGINE logs -f "$CONTAINER"
+        ;;
+
+    console)
+        exec $ENGINE exec -it "$CONTAINER" rcon-cli
+        ;;
+
+    cmd)
+        shift
+
+        if [[ -z "$*" ]]; then
+            echo 'Usage: mc cmd "<minecraft command>"'
+            exit 1
+        fi
+
+        exec $ENGINE exec "$CONTAINER" rcon-cli "$*"
+        ;;
+
+    ""|-h|--help|help)
+        usage
+        ;;
+
+    *)
+        echo "Unknown command: $1"
+        echo
+        usage
+        exit 1
+        ;;
+esac
