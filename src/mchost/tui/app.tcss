@@ -1,0 +1,200 @@
+Screen {
+    layout: vertical;
+}
+
+#main {
+    height: 1fr;
+}
+
+#sidebar {
+    width: 36;
+    padding: 0 1;
+    border-right: solid $panel;
+}
+
+.sidebar-title {
+    color: $text-muted;
+    text-style: bold;
+    padding: 1 0 1 1;
+}
+
+#new-instance {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+#instance-list {
+    height: auto;
+}
+
+.empty {
+    color: $text-muted;
+    padding: 1;
+}
+
+.instance-row {
+    height: 4;
+    margin: 0 0 0 0;
+    padding: 0 1;
+    border: round $panel-lighten-2;
+}
+
+.instance-row:hover {
+    background: $boost;
+    border: round $accent;
+}
+
+.instance-row.selected {
+    background: $panel-lighten-2;
+    border: round $accent;
+}
+
+.dot {
+    width: 2;
+    content-align: center middle;
+}
+
+.state-running {
+    color: $success;
+}
+
+.state-restarting {
+    color: $error;
+}
+
+.state-exited,
+.state-created,
+.state-paused {
+    color: $warning;
+}
+
+.state-missing,
+.state-unknown {
+    color: $text-muted;
+}
+
+.row-text {
+    width: 1fr;
+    height: auto;
+}
+
+.row-name {
+    text-style: bold;
+}
+
+.row-version {
+    color: $text-muted;
+}
+
+#detail {
+    width: 1fr;
+}
+
+#action-bar {
+    height: 3;
+    padding: 0 1;
+}
+
+#detail-title {
+    width: 1fr;
+    height: 3;
+    content-align: left middle;
+    padding-left: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#detail-state {
+    width: auto;
+    min-width: 10;
+    height: 3;
+    content-align: left middle;
+}
+
+#action-bar Button {
+    min-width: 7;
+    margin: 0 0 0 1;
+}
+
+#action-bar Button:disabled {
+    opacity: 0.45;
+}
+
+#btn-more,
+#btn-commands {
+    min-width: 3;
+    width: 3;
+}
+
+#tabs {
+    height: 1fr;
+}
+
+TabPane {
+    height: 1fr;
+}
+
+#console-pane {
+    height: 1fr;
+}
+
+#console-log {
+    height: 1fr;
+    border: solid $panel;
+}
+
+#console-input-row {
+    height: 3;
+}
+
+#console-input {
+    width: 1fr;
+}
+
+#logs-view {
+    height: 1fr;
+    border: solid $panel;
+}
+
+.file-pane {
+    height: 1fr;
+    padding: 1;
+}
+
+.file-toolbar {
+    height: 3;
+}
+
+.file-summary {
+    width: 1fr;
+    content-align: left middle;
+    color: $text-muted;
+}
+
+.file-toolbar Button {
+    min-width: 9;
+}
+
+#mods-table,
+#configs-table,
+#backups-table {
+    height: 1fr;
+    border: solid $panel;
+}
+
+.file-note {
+    height: 1;
+    color: $text-muted;
+    padding-top: 1;
+}
+
+#modpacks-details {
+    height: auto;
+    padding: 1;
+    color: $text-muted;
+}
+
+.placeholder {
+    padding: 2 3;
+    color: $text-muted;
+}

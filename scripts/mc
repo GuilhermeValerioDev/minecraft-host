@@ -1,39 +1,31 @@
 #!/usr/bin/env bash
+# Backwards-compatible wrapper around mchost.
+#
+# The original single-instance workflow read INSTANCE from .env. New scripts
+# should call mchost directly (mchost start <slug>); this shim exists so old
+# muscle memory and any external scripts keep working during the transition.
+set -euo pipefail
 
-set -e
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+cd "$ROOT"
 
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-cd "$SCRIPT_DIR/.."
-
-if command -v podman >/dev/null 2>&1; then
-    ENGINE="podman"
-elif command -v docker >/dev/null 2>&1; then
-    ENGINE="docker"
+if [[ -x "$ROOT/mchost" ]]; then
+    MCHOST="$ROOT/mchost"
+elif command -v mchost >/dev/null 2>&1; then
+    MCHOST="$(command -v mchost)"
 else
-    echo "❌ Neither Podman nor Docker is installed."
+    echo "❌ mchost not found." >&2
     exit 1
 fi
 
-if [[ ! -f ".env" ]]; then
-    echo "❌ .env not found."
-    exit 1
+INSTANCE=""
+if [[ -f .env ]]; then
+    INSTANCE="$(sed -n 's/^INSTANCE=//p' .env | tail -n 1 | tr -d "\"'")"
 fi
-
-source .env
-
-CONTAINER="mc-${INSTANCE}"
-
-restore_ownership() {
-    echo "🔧 Restoring file ownership..."
-
-    sudo chown -R "$USER:$USER" "./instances/$INSTANCE/server"
-
-    echo "✅ Ownership restored."
-}
 
 usage() {
 cat <<EOF
-Minecraft Host CLI
+Minecraft Host CLI (compatibility shim)
 
 Usage:
   mc start
@@ -44,66 +36,32 @@ Usage:
   mc console
   mc cmd "<command>"
 
-Examples:
-  mc start
-  mc logs
-  mc console
-  mc cmd "say Hello everyone!"
-  mc cmd "save-all"
+The instance is read from INSTANCE in .env. For multiple instances use
+mchost directly, for example: mchost switch FTBNeoTech
 EOF
 }
 
+require_instance() {
+    if [[ -z "$INSTANCE" ]]; then
+        echo "❌ INSTANCE is not set in .env; use mchost directly." >&2
+        exit 1
+    fi
+}
+
 case "${1:-}" in
-    start)
-        echo "🚀 Starting $INSTANCE..."
-        $ENGINE compose up -d
-        ;;
-
-    stop)
-        echo "🛑 Stopping $INSTANCE..."
-        $ENGINE compose down
-
-        if ! $ENGINE ps --format "{{.Names}}" | grep -qx "$CONTAINER"; then
-            restore_ownership
-        else
-            echo "⚠️ Container still appears to be running; skipping ownership restore."
-        fi
-        ;;
-
-    restart)
-        echo "🔄 Restarting $INSTANCE..."
-        $ENGINE compose down
-
-        if ! $ENGINE ps --format "{{.Names}}" | grep -qx "$CONTAINER"; then
-            restore_ownership
-        else
-            echo "⚠️ Container still appears to be running; skipping ownership restore."
-        fi
-
-        $ENGINE compose up -d
-        ;;
-
-    status)
-        $ENGINE ps --filter "name=$CONTAINER"
-        ;;
-
-    logs)
-        $ENGINE logs -f "$CONTAINER"
-        ;;
-
-    console)
-        exec $ENGINE exec -it "$CONTAINER" rcon-cli
+    start|stop|restart|status|logs|console)
+        require_instance
+        exec "$MCHOST" "$1" "$INSTANCE"
         ;;
 
     cmd)
+        require_instance
         shift
-
         if [[ -z "$*" ]]; then
-            echo 'Usage: mc cmd "<minecraft command>"'
+            echo 'Usage: mc cmd "<minecraft command>"' >&2
             exit 1
         fi
-
-        exec $ENGINE exec "$CONTAINER" rcon-cli "$*"
+        exec "$MCHOST" cmd "$INSTANCE" "$*"
         ;;
 
     ""|-h|--help|help)
@@ -111,9 +69,7 @@ case "${1:-}" in
         ;;
 
     *)
-        echo "Unknown command: $1"
-        echo
-        usage
-        exit 1
+        # Anything new can go straight through to mchost.
+        exec "$MCHOST" "$@"
         ;;
 esac
