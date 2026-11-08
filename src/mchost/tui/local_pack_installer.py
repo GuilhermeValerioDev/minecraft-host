@@ -183,8 +183,16 @@ class LocalPackInstaller(ModalScreen[str | None]):
             self.query_one("#local-loader-version", Input).value = (
                 info.loader_version
             )
+        if info.suggested_memory:
+            self.query_one("#local-memory", Input).value = info.suggested_memory
+        note = info.notes
+        if info.serverstarter is not None:
+            note += (
+                "\nServerStarter pack: mods and overrides are downloaded "
+                "during install."
+            )
         self.query_one("#local-info", Static).update(
-            f"{info.notes}\n"
+            f"{note}\n"
             f"Pack version: {info.pack_version or 'unknown'}"
         )
         self._set_status("Archive inspected.")
@@ -262,6 +270,13 @@ class LocalPackInstaller(ModalScreen[str | None]):
         loader_version: str | None,
         memory: str,
     ) -> None:
+        def progress(done: int, total: int) -> None:
+            if total:
+                self.app.call_from_thread(
+                    self._set_status,
+                    f"Installing mods… {done}/{total}",
+                )
+
         try:
             instance = install_local_pack(
                 self._layout,
@@ -271,6 +286,7 @@ class LocalPackInstaller(ModalScreen[str | None]):
                 mc_version=mc_version,
                 loader_version=loader_version,
                 memory=memory,
+                progress=progress,
             )
         except (MchostError, OSError) as exc:
             self.app.call_from_thread(self._install_failed, str(exc))

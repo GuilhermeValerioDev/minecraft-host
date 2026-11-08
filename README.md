@@ -19,6 +19,7 @@ dashboard does is also available as a scriptable command.
 - 📦 Multiple instances, one running at a time (stable ports, no surprises)
 - 🖥️ Mouse-first terminal dashboard with sidebar, tabs, live logs, and RCON console
 - ⏱️ Live uptime clock in the Overview while an instance is running
+- ➕ Add-instance chooser: custom server, Modrinth pack, or local CurseForge pack
 - 📂 Mods and Configs tabs: enable/disable/delete mods and edit configs in-app
 - 💾 World and full backups with RCON-safe snapshots, retention, and restore
 - 🧩 Modrinth modpack browser with server-pack preference and SHA-512 pinning
@@ -68,7 +69,7 @@ minecraft-host/
 │   ├── instances.py       # lifecycle helpers (delete)
 │   ├── cli.py             # mchost commands
 │   └── tui/               # Textual dashboard, modals, theme
-├── tests/                 # 112 tests; mostly no Docker required
+├── tests/                 # 119 tests; mostly no Docker required
 ├── docs/screenshots/
 ├── instances/<slug>/      # per-instance config, compose, pack, data
 ├── backups/<slug>/        # per-instance backup archives
@@ -135,8 +136,9 @@ In the dashboard:
 
 - Click an instance in the sidebar to open it. Instance cards are boxed;
   actions live in the header and the right-click menu.
-- Click `+ New instance` (or press `n`) to create one: name, loader, MC version,
-  exact loader build, and memory.
+- Click `+ New instance` (or press `n`) and choose **Custom server**,
+  **Modrinth pack**, or **CurseForge pack**. Custom opens the version wizard;
+  Modrinth opens the browser; CurseForge opens the local-archive installer.
 - Use the header buttons for Start / Stop / Restart / Version.
 - Right-click a row for Start, Stop, Restart, Change version, Backup, and Reveal data.
 - Click tabs to switch between Overview, Console, Logs, Mods, Configs, Backups,
@@ -443,10 +445,16 @@ yourself, then use **Modpacks → Install CurseForge pack** in the dashboard (or
 - inspects the archive for `manifest.json`, Forge/NeoForge libraries, launch
   scripts, and vanilla server jars to infer the loader, Minecraft version, and
   exact loader build;
-- lets you override the inferred values;
-- extracts the archive into `instances/<slug>/server/`, flattening a single
-  top-level wrapper folder;
-- keeps the original archive in `instances/<slug>/pack/`; and
+- understands **TeamAOF ServerStarter** packs (`server-setup-config.yaml`),
+  including their `modpackUrl`, loader version, client-mod ignore list, and
+  suggested RAM;
+- for ServerStarter packs, downloads the referenced pack archive, extracts its
+  `overrides/`, and downloads the server mods listed in the CurseForge manifest
+  into `mods/` (client-only projects and ignored file patterns are skipped);
+- extracts ordinary archives into `instances/<slug>/server/`, flattening a
+  single top-level wrapper folder;
+- keeps the original archive and any downloaded pack archive in
+  `instances/<slug>/pack/`; and
 - configures `TYPE`, `VERSION`, and the loader version so itzg installs the
   matching loader on first start.
 
@@ -454,7 +462,12 @@ yourself, then use **Modpacks → Install CurseForge pack** in the dashboard (or
 mchost modpack local ~/Downloads/MyPack-Server.zip
 mchost modpack local ~/Downloads/MyPack-Server.zip --name "My Pack" \
   --loader forge --mc-version 1.20.1 --loader-version 47.2.0
+mchost modpack local ~/Downloads/Craftoria-Server-1.37.0.zip
 ```
+
+A ServerStarter install can take a while: the pack’s referenced mods are
+downloaded from the URLs in its manifest, with progress shown in the dashboard.
+The first install of a large pack can be several hundred MB.
 
 Local packs are marked `source = "local"` in `instance.toml`; the Modpacks tab
 shows them as local and disables the Modrinth update/link actions. To update

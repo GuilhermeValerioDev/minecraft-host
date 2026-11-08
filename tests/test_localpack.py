@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import shutil
 import zipfile
 
 import pytest
+import yaml
 
 from mchost.compose import write_compose
 from mchost.config import load_instance
@@ -121,3 +123,121 @@ def test_install_local_pack_rejects_traversal(tmp_path):
             mc_version="1.20.1",
         )
     assert not layout.instance_dir("evil").exists()
+
+
+def make_serverstarter_pack(tmp_path):
+    full = tmp_path / "Craftoria-1.37.0.zip"
+    manifest = {
+        "name": "Craftoria",
+        "version": "1.37.0",
+        "minecraft": {
+            "version": "1.21.1",
+            "modLoaders": [{"id": "neoforge-21.1.249", "primary": True}],
+        },
+        "files": [
+            {
+                "projectID": 1,
+                "downloadUrl": "https://example.invalid/mods/keep.jar",
+                "required": True,
+            },
+            {
+                "projectID": 2,
+                "downloadUrl": "https://example.invalid/mods/ignored-client.jar",
+                "required": True,
+            },
+            {
+                "projectID": 3,
+                "downloadUrl": "https://example.invalid/mods/optifine-x.jar",
+                "required": True,
+            },
+            {
+                "projectID": 4,
+                "downloadUrl": "https://example.invalid/mods/keep2.jar",
+                "required": True,
+            },
+        ],
+    }
+    with zipfile.ZipFile(full, "w") as archive:
+        archive.writestr("manifest.json", json.dumps(manifest))
+        archive.writestr("overrides/config/example.toml", "a = 1\n")
+        archive.writestr("overrides/mods/override.jar", b"override")
+
+    setup = {
+        "_specver": 2,
+        "modpack": {"name": "Craftoria", "description": "test"},
+        "install": {
+            "mcVersion": None,
+            "loaderVersion": "21.1.249",
+            "modpackUrl": "https://example.invalid/Craftoria-1.37.0.zip",
+            "installerUrl": "https://maven.neoforged.net/releases/net/neoforged/neoforge/21.1.249/neoforge-21.1.249-installer.jar",
+            "ignoreFiles": ["mods/optifine*.jar", "resources/**"],
+            "formatSpecific": {"ignoreProject": [2]},
+        },
+        "launch": {"maxRam": "5G"},
+    }
+    server_pack = tmp_path / "Craftoria-Server-1.37.0.zip"
+    with zipfile.ZipFile(server_pack, "w") as archive:
+        archive.writestr("server-setup-config.yaml", yaml.safe_dump(setup))
+        archive.writestr("startserver.sh", "#!/usr/bin/env bash\n")
+    return server_pack, full
+
+
+def test_inspect_serverstarter_pack(tmp_path):
+    server_pack, _full = make_serverstarter_pack(tmp_path)
+    info = inspect_local_pack(server_pack)
+    assert info.name == "Craftoria"
+    assert info.pack_version == "1.37.0"
+    assert info.loader == "neoforge"
+    assert info.loader_version == "21.1.249"
+    assert info.mc_version == "1.21.1"
+    assert info.suggested_memory == "5G"
+    assert info.serverstarter is not None
+    assert info.serverstarter.ignore_projects == frozenset({2})
+    assert "server-setup-config.yaml" in info.notes
+
+
+def test_install_serverstarter_downloads_mods_and_overrides(tmp_path, monkeypatch):
+    layout = Layout(tmp_path)
+    layout.ensure()
+    server_pack, full_pack = make_serverstarter_pack(tmp_path)
+
+    def fake_download(url, destination, *, retries=2):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if url == "https://example.invalid/Craftoria-1.37.0.zip":
+            shutil.copy2(full_pack, destination)
+        else:
+            destination.write_bytes(b"jar")
+        return destination
+
+    monkeypatch.setattr("mchost.localpack._download_file", fake_download)
+
+    instance = install_local_pack(
+        layout,
+        server_pack,
+        name="Craftoria",
+        loader="neoforge",
+        mc_version="1.21.1",
+        loader_version="21.1.249",
+        memory="5G",
+    )
+
+    loaded = load_instance(layout, instance.slug)
+    assert loaded.kind == "modpack"
+    assert loaded.modpack.source == "local"
+    assert loaded.modpack.version_number == "1.37.0"
+    assert loaded.loader == "neoforge"
+    assert loaded.mc_version == "1.21.1"
+    assert loaded.loader_version == "21.1.249"
+    server = layout.server_dir_for(loaded)
+    assert (server / "mods/keep.jar").is_file()
+    assert (server / "mods/keep2.jar").is_file()
+    assert (server / "mods/override.jar").is_file()
+    assert not (server / "mods/ignored-client.jar").exists()
+    assert not (server / "mods/optifine-x.jar").exists()
+    assert (server / "config/example.toml").is_file()
+    compose = layout.compose_file(loaded.slug).read_text(encoding="utf-8")
+    assert "TYPE: NEOFORGE" in compose
+    assert "VERSION: 1.21.1" in compose
+    assert "NEOFORGE_VERSION: 21.1.249" in compose
+    assert "GENERIC_PACK" not in compose
+    assert (layout.pack_dir(loaded.slug) / "Craftoria-1.37.0.zip").is_file()

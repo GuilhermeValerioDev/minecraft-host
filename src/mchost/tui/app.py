@@ -57,6 +57,7 @@ from ..modrinth import (
 )
 from .widgets import ConfirmDialog, ConfirmSwitch, ContextMenu, InstanceRow
 from .new_instance import NewInstanceWizard
+from .new_instance_chooser import NewInstanceChooser
 from .version_picker import VersionPicker
 from .modpack_browser import ModpackBrowser
 from .config_editor import ConfigEditor
@@ -1363,7 +1364,19 @@ class MchostApp(App[None]):
 
     def action_new(self) -> None:
         if not self._typing():
-            self.push_screen(NewInstanceWizard(self.layout), self._new_instance_created)
+            self.push_screen(NewInstanceChooser(), self._new_instance_choice)
+
+    def _new_instance_choice(self, choice: str | None) -> None:
+        if choice == "custom":
+            self.push_screen(
+                NewInstanceWizard(self.layout), self._new_instance_created
+            )
+        elif choice == "modrinth":
+            self.push_screen(ModpackBrowser(self.layout), self._modpack_created)
+        elif choice == "curseforge":
+            self.push_screen(
+                LocalPackInstaller(self.layout), self._local_pack_installed
+            )
 
     def _new_instance_created(self, slug: str | None) -> None:
         if not slug:

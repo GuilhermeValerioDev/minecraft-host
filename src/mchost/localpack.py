@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import re
 import shutil
 import tarfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Callable
+from urllib.parse import urlparse
+
+import httpx
+import yaml
 
 from .compose import write_compose
 from .config import (
@@ -26,6 +32,7 @@ from .config import (
 from .errors import MchostError
 from .modrinth import unique_slug
 from .paths import Layout
+from .versions import USER_AGENT
 
 MARKERS = {
     "mods",
@@ -45,6 +52,14 @@ START_SCRIPTS = ("startserver.sh", "start.sh", "run.sh", "user_jvm_args.txt")
 
 
 @dataclass(frozen=True)
+class ServerStarterConfig:
+    modpack_url: str
+    ignore_projects: frozenset[int]
+    ignore_files: tuple[str, ...]
+    max_ram: str | None
+
+
+@dataclass(frozen=True)
 class LocalPackInfo:
     name: str
     pack_version: str
@@ -52,6 +67,8 @@ class LocalPackInfo:
     loader: str | None
     loader_version: str | None
     notes: str
+    suggested_memory: str | None = None
+    serverstarter: ServerStarterConfig | None = None
 
 
 def _archive_kind(path: Path) -> str:
@@ -130,6 +147,109 @@ def _loader_from_id(value: str) -> tuple[str | None, str | None]:
                     version = tail
             return loader, version
     return None, None
+
+
+def _loader_from_installer(url: str) -> str | None:
+    lowered = url.lower()
+    if "neoforged/neoforge" in lowered:
+        return "neoforge"
+    if "minecraftforge/forge" in lowered:
+        return "forge"
+    if "fabric" in lowered:
+        return "fabric"
+    if "quilt" in lowered:
+        return "quilt"
+    return None
+
+
+def _parse_serverstarter(
+    path: Path, names: list[str]
+) -> tuple[
+    ServerStarterConfig | None,
+    str,
+    str,
+    str | None,
+    str | None,
+    str | None,
+]:
+    """Parse a TeamAOF ServerStarter server-setup-config.yaml."""
+    candidates = sorted(
+        (name for name in names if Path(name).name == "server-setup-config.yaml"),
+        key=len,
+    )
+    if not candidates:
+        return None, "", "", None, None, None
+    raw = _read_member(path, candidates[0], limit=256 * 1024)
+    if not raw:
+        return None, "", "", None, None, None
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        return None, "", "", None, None, None
+    if not isinstance(data, dict):
+        return None, "", "", None, None, None
+
+    install = data.get("install") or {}
+    modpack = data.get("modpack") or {}
+    launch = data.get("launch") or {}
+    if not isinstance(install, dict):
+        install = {}
+    if not isinstance(modpack, dict):
+        modpack = {}
+    if not isinstance(launch, dict):
+        launch = {}
+
+    installer_url = str(install.get("installerUrl") or "")
+    loader_version = str(install.get("loaderVersion") or "") or None
+    loader = _loader_from_installer(installer_url)
+    mc_version = str(install.get("mcVersion") or "") or None
+    if not loader and loader_version:
+        if re.match(r"^(?:20|21|26|47)\.", loader_version):
+            loader = "neoforge"
+    if not mc_version and loader == "neoforge" and loader_version:
+        mc_version = mc_from_neoforge(loader_version)
+    pack_name = str(modpack.get("name") or "")
+    modpack_url = str(install.get("modpackUrl") or "")
+
+    format_specific = install.get("formatSpecific") or {}
+    if not isinstance(format_specific, dict):
+        format_specific = {}
+    ignore_projects: set[int] = set()
+    for value in format_specific.get("ignoreProject") or []:
+        try:
+            ignore_projects.add(int(value))
+        except (TypeError, ValueError):
+            pass
+    ignore_files = tuple(
+        str(value) for value in (install.get("ignoreFiles") or []) if value
+    )
+    max_ram = str(launch.get("maxRam") or "") or None
+
+    pack_version = ""
+    match = re.search(
+        r"[-_]v?([0-9]+(?:\.[0-9]+){1,3})\.zip$",
+        Path(urlparse(modpack_url).path).name,
+        re.IGNORECASE,
+    )
+    if match:
+        pack_version = match.group(1)
+
+    config = None
+    if modpack_url:
+        config = ServerStarterConfig(
+            modpack_url=modpack_url,
+            ignore_projects=frozenset(ignore_projects),
+            ignore_files=ignore_files,
+            max_ram=max_ram,
+        )
+    return (
+        config,
+        pack_name,
+        pack_version,
+        mc_version,
+        loader,
+        loader_version,
+    )
 
 
 def inspect_local_pack(path: Path) -> LocalPackInfo:
@@ -257,6 +377,31 @@ def inspect_local_pack(path: Path) -> LocalPackInfo:
             loader = loader or "vanilla"
             notes.append(f"vanilla server jar {match.group(1)}")
 
+    (
+        starter_config,
+        starter_name,
+        starter_version,
+        starter_mc,
+        starter_loader,
+        starter_loader_version,
+    ) = _parse_serverstarter(path, names)
+    if starter_name:
+        pack_name = starter_name
+    if starter_version and not pack_version:
+        pack_version = starter_version
+    if starter_mc:
+        mc_version = mc_version or starter_mc
+    if starter_loader:
+        loader = loader or starter_loader
+    if starter_loader_version:
+        loader_version = loader_version or starter_loader_version
+    if starter_config:
+        notes.append(
+            "server-setup-config.yaml: "
+            f"{starter_loader or 'unknown loader'} "
+            f"{starter_loader_version or ''} / MC {starter_mc or 'unknown'}"
+        )
+
     if not notes:
         notes.append(
             "No loader metadata found; choose a loader and Minecraft version."
@@ -268,6 +413,8 @@ def inspect_local_pack(path: Path) -> LocalPackInfo:
         loader=loader,
         loader_version=loader_version,
         notes="; ".join(dict.fromkeys(notes)),
+        suggested_memory=starter_config.max_ram if starter_config else None,
+        serverstarter=starter_config,
     )
 
 
@@ -318,6 +465,190 @@ def _flatten_root(tmp: Path) -> Path:
     return tmp
 
 
+def _download_file(url: str, destination: Path, *, retries: int = 2) -> Path:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise MchostError(f"refusing to download a non-HTTP URL: {url}")
+    if destination.is_file() and destination.stat().st_size > 0:
+        return destination
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + ".part")
+    last_error: Exception | None = None
+    for _attempt in range(retries):
+        try:
+            with httpx.stream(
+                "GET",
+                url,
+                headers={"User-Agent": USER_AGENT},
+                follow_redirects=True,
+                timeout=120,
+            ) as response:
+                response.raise_for_status()
+                with temporary.open("wb") as handle:
+                    for chunk in response.iter_bytes(1024 * 256):
+                        handle.write(chunk)
+            temporary.replace(destination)
+            return destination
+        except (httpx.HTTPError, OSError) as exc:
+            last_error = exc
+            temporary.unlink(missing_ok=True)
+    raise MchostError(f"could not download {url}: {last_error}")
+
+
+def _extract_overrides(
+    pack_path: Path, server: Path, ignore_patterns: tuple[str, ...] = ()
+) -> None:
+    root = server.resolve()
+    try:
+        with zipfile.ZipFile(pack_path) as archive:
+            for member in archive.infolist():
+                name = member.filename.replace("\\", "/")
+                if not name.startswith("overrides/") or name.endswith("/"):
+                    continue
+                relative = name[len("overrides/") :]
+                if not relative:
+                    continue
+                if any(
+                    fnmatch.fnmatch(relative, pattern)
+                    for pattern in ignore_patterns
+                ):
+                    continue
+                target = (root / relative).resolve()
+                if not target.is_relative_to(root):
+                    raise MchostError(f"unsafe override path: {name}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                mode = (member.external_attr >> 16) & 0o777
+                if mode:
+                    try:
+                        target.chmod(mode)
+                    except OSError:
+                        pass
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise MchostError(f"could not extract overrides: {exc}") from exc
+
+
+def _install_serverstarter(
+    info: LocalPackInfo,
+    pack_dir: Path,
+    server: Path,
+    progress: Callable[[int, int], None] | None = None,
+) -> tuple[str, str, str | None, str]:
+    """Install a TeamAOF ServerStarter pack by resolving its CurseForge manifest."""
+    config = info.serverstarter
+    if config is None or not config.modpack_url:
+        raise MchostError("server-setup-config.yaml does not declare a modpack URL")
+
+    pack_name = Path(urlparse(config.modpack_url).path).name or "modpack.zip"
+    full_pack = pack_dir / pack_name
+    _download_file(config.modpack_url, full_pack)
+
+    try:
+        with zipfile.ZipFile(full_pack) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+    except (OSError, KeyError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
+        raise MchostError(f"could not read {pack_name}: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise MchostError(f"{pack_name} has an invalid manifest")
+
+    _extract_overrides(full_pack, server, config.ignore_files)
+
+    minecraft = manifest.get("minecraft") or {}
+    if not isinstance(minecraft, dict):
+        minecraft = {}
+    mc_version = str(minecraft.get("version") or "") or info.mc_version or "LATEST"
+    loader = info.loader or "vanilla"
+    loader_version = info.loader_version
+    mod_loaders = minecraft.get("modLoaders") or []
+    if isinstance(mod_loaders, list) and mod_loaders:
+        chosen = next(
+            (
+                item
+                for item in mod_loaders
+                if isinstance(item, dict) and item.get("primary")
+            ),
+            mod_loaders[0] if isinstance(mod_loaders[0], dict) else None,
+        )
+        if isinstance(chosen, dict):
+            parsed_loader, parsed_version = _loader_from_id(
+                str(chosen.get("id") or "")
+            )
+            loader = parsed_loader or loader
+            loader_version = parsed_version or loader_version
+
+    files = manifest.get("files") or []
+    targets: list[tuple[str, Path]] = []
+    missing: list[int] = []
+    seen: set[str] = set()
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            project_id = int(entry.get("projectID", 0))
+        except (TypeError, ValueError):
+            project_id = 0
+        if project_id in config.ignore_projects:
+            continue
+        url = entry.get("downloadUrl")
+        if not url:
+            if entry.get("required", True):
+                missing.append(project_id)
+            continue
+        filename = Path(urlparse(str(url)).path).name
+        if not filename or filename in seen:
+            continue
+        seen.add(filename)
+        relative = f"mods/{filename}"
+        if any(
+            fnmatch.fnmatch(relative, pattern)
+            or fnmatch.fnmatch(filename, pattern)
+            for pattern in config.ignore_files
+        ):
+            continue
+        destination = server / "mods" / filename
+        if destination.exists():
+            continue
+        targets.append((str(url), destination))
+
+    if missing:
+        raise MchostError(
+            f"{len(missing)} required mods have no download URL in the pack "
+            f"manifest (project IDs: {', '.join(map(str, missing[:8]))})"
+        )
+
+    total = len(targets)
+    if progress:
+        progress(0, total)
+    failures: list[str] = []
+    completed = 0
+    if targets:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = {
+                pool.submit(_download_file, url, destination): (url, destination)
+                for url, destination in targets
+            }
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except (MchostError, OSError) as exc:
+                    failures.append(str(exc))
+                completed += 1
+                if progress:
+                    progress(completed, total)
+    if failures:
+        raise MchostError(
+            f"{len(failures)} mod downloads failed; first error: {failures[0]}"
+        )
+
+    return (
+        loader,
+        mc_version,
+        loader_version,
+        str(manifest.get("version") or info.pack_version or ""),
+    )
+
+
 def _sha512(path: Path) -> str:
     digest = hashlib.sha512()
     with path.open("rb") as handle:
@@ -336,6 +667,7 @@ def install_local_pack(
     loader_version: str | None = None,
     memory: str = "6G",
     tz: str | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> Instance:
     archive = archive.expanduser().resolve()
     if not archive.is_file():
@@ -360,35 +692,43 @@ def install_local_pack(
         if archive != destination:
             shutil.copy2(archive, destination)
         digest = _sha512(destination)
+        server = layout.server_dir(slug)
+        server.mkdir(parents=True, exist_ok=True)
+        pack_version = info.pack_version
+        pack_url = ""
 
-        tmp = instance_dir / ".extract"
-        tmp.mkdir()
-        try:
-            _safe_extract(archive, tmp)
-            root = _flatten_root(tmp)
-            server = layout.server_dir(slug)
-            server.mkdir(parents=True, exist_ok=True)
-            for entry in root.iterdir():
-                target = server / entry.name
-                if target.exists():
-                    if target.is_dir():
-                        shutil.rmtree(target)
-                    else:
-                        target.unlink()
-                shutil.move(str(entry), str(target))
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+        if info.serverstarter is not None:
+            loader, mc_version, loader_version, pack_version = (
+                _install_serverstarter(info, pack_dir, server, progress)
+            )
+            pack_url = info.serverstarter.modpack_url
+        else:
+            tmp = instance_dir / ".extract"
+            tmp.mkdir()
+            try:
+                _safe_extract(archive, tmp)
+                root = _flatten_root(tmp)
+                for entry in root.iterdir():
+                    target = server / entry.name
+                    if target.exists():
+                        if target.is_dir():
+                            shutil.rmtree(target)
+                        else:
+                            target.unlink()
+                    shutil.move(str(entry), str(target))
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
 
         pack = ModpackConfig(
             source="local",
             project=info.name or name,
             version_id="",
-            version_number=info.pack_version,
+            version_number=pack_version,
             mode="server",
             file_name=destination.name,
             file_kind=kind,
             sha512=digest,
-            url="",
+            url=pack_url,
             resolved={
                 "minecraft": mc_version,
                 "loader": loader,

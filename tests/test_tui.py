@@ -11,6 +11,7 @@ from mchost.engine import EngineInfo
 from mchost.paths import Layout
 from mchost.tui.app import MchostApp
 from mchost.tui.new_instance import NewInstanceWizard
+from mchost.tui.new_instance_chooser import NewInstanceChooser
 from mchost.tui.version_picker import VersionPicker
 from mchost.tui.widgets import ConfirmDialog, ConfirmSwitch, ContextMenu
 from mchost.tui.modpack_browser import ModpackBrowser
@@ -807,6 +808,25 @@ def test_modpack_browser_installs(tmp_path, monkeypatch):
     assert app.selected_slug == "installed-pack"
 
 
+def test_new_instance_chooser_offers_three_paths(tmp_path):
+    app, _fake = make_app(tmp_path, names=())
+
+    async def run():
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause(0.2)
+            app.action_new()
+            await pilot.pause(0.3)
+            chooser = app.screen
+            assert isinstance(chooser, NewInstanceChooser)
+            assert chooser.query_one("#choice-custom")
+            assert chooser.query_one("#choice-modrinth")
+            assert chooser.query_one("#choice-curseforge")
+            await pilot.click("#choice-cancel")
+            await pilot.pause(0.2)
+
+    asyncio.run(run())
+
+
 def test_new_instance_wizard_creates_instance(tmp_path, monkeypatch):
     import mchost.tui.new_instance as wizard_module
 
@@ -825,7 +845,10 @@ def test_new_instance_wizard_creates_instance(tmp_path, monkeypatch):
         async with app.run_test(size=(120, 44)) as pilot:
             await pilot.pause(0.2)
             app.action_new()
-            await pilot.pause(0.4)
+            await pilot.pause(0.3)
+            assert isinstance(app.screen, NewInstanceChooser)
+            await pilot.click("#choice-custom")
+            await pilot.pause(0.3)
             wizard = app.screen
             assert isinstance(wizard, NewInstanceWizard)
 
