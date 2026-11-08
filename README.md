@@ -18,6 +18,7 @@ dashboard does is also available as a scriptable command.
 - 🧭 In-app MC × loader picker with latest/recommended markers
 - 📦 Multiple instances, one running at a time (stable ports, no surprises)
 - 🖥️ Mouse-first terminal dashboard with sidebar, tabs, live logs, and RCON console
+- ⏱️ Live uptime clock in the Overview while an instance is running
 - 📂 Mods and Configs tabs: enable/disable/delete mods and edit configs in-app
 - 💾 World and full backups with RCON-safe snapshots, retention, and restore
 - 🧩 Modrinth modpack browser with server-pack preference and SHA-512 pinning
@@ -148,6 +149,8 @@ In the dashboard:
 - **Modpacks**: browse Modrinth, install a pack, check for updates, update in
   place, copy the pack's Modrinth link, or install a local CurseForge server
   pack you downloaded.
+- The **Overview** shows status, loader/MC, ports, memory, and a live uptime
+  clock while the server is running.
 - **Memory**: right-click a row → **Change memory**, or press `m`. Works for
   hand-built servers and prebuilt modpacks; restart to apply.
 - **Delete**: right-click an instance and choose **Delete instance**. The
@@ -484,6 +487,9 @@ The suite covers config/compose generation, migration, version and Modrinth
 resolution, backup archives and restores, local CurseForge pack inspection,
 instance deletion, and Textual flows using a fake engine. Most tests do not
 need Docker or network access.
+
+For a guided reading order through the codebase, see
+[LEARNING.md](LEARNING.md).
 
 ### Good to know
 

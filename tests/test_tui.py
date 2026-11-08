@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 from textual.widgets import Button, DataTable, Input, Static, TabbedContent
 
@@ -38,6 +39,9 @@ class FakeEngine:
 
     def is_running(self, slug: str) -> bool:
         return self.state(slug) == "running"
+
+    def started_at(self, slug: str):
+        return datetime.now(timezone.utc) - timedelta(seconds=65)
 
     def running_slugs(self) -> list[str]:
         return [slug for slug, state in self.states.items() if state == "running"]
@@ -293,6 +297,60 @@ def test_backups_tab_creates_and_restores(tmp_path):
             await pilot.click("#dialog-confirm")
             await pilot.pause(0.8)
             assert (server / "world" / "level.dat").read_text(encoding="utf-8") == "original"
+
+    asyncio.run(run())
+
+
+def test_format_uptime():
+    from mchost.tui.app import format_uptime
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert format_uptime(start, start + timedelta(seconds=5)) == "00:00:05"
+    assert (
+        format_uptime(start, start + timedelta(hours=1, minutes=2, seconds=3))
+        == "01:02:03"
+    )
+    assert (
+        format_uptime(start, start + timedelta(days=1, seconds=1))
+        == "1d 00:00:01"
+    )
+
+
+def test_overview_shows_uptime_only_while_running(tmp_path):
+    import io
+
+    from rich.console import Console
+
+    app, fake = make_app(tmp_path)
+
+    def overview_text():
+        instance = app._selected()
+        assert instance is not None
+        buffer = io.StringIO()
+        console = Console(
+            file=buffer, width=120, record=True, force_terminal=False
+        )
+        console.print(app._overview(instance))
+        return buffer.getvalue()
+
+    async def run():
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause(0.2)
+            assert app._uptime_label(app._selected()) is None
+            assert "up " not in overview_text()
+
+            fake.states["demo"] = "running"
+            app._poll_states()
+            await pilot.pause(0.4)
+            assert app._uptime_label(app._selected()) is not None
+            assert "up " in overview_text()
+            assert "demo" in app._started_at
+
+            fake.states["demo"] = "exited"
+            app._poll_states()
+            await pilot.pause(0.4)
+            assert app._uptime_label(app._selected()) is None
+            assert "up " not in overview_text()
 
     asyncio.run(run())
 

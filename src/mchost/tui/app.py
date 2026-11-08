@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -85,6 +85,20 @@ def format_size(size: int) -> str:
 
 def short_time(value: str) -> str:
     return value.replace("T", " ")[:16] if value else "—"
+
+
+def format_uptime(started: datetime, now: datetime | None = None) -> str:
+    """Format a start time as a compact, ticking uptime clock."""
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    seconds = max(0, int((current - started).total_seconds()))
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if days:
+        return f"{days}d {hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def scan_files(
@@ -201,6 +215,7 @@ class MchostApp(App[None]):
         self._stream_slug: str | None = None
         self._log_history: list[str] = []
         self._modpack_link: str | None = None
+        self._started_at: dict[str, datetime] = {}
 
     # -- layout ------------------------------------------------------------
 
@@ -365,6 +380,7 @@ class MchostApp(App[None]):
         else:
             self._detect_engine()
         self.set_interval(4.0, self._poll_states)
+        self.set_interval(1.0, self._tick_uptime)
 
     def on_unmount(self) -> None:
         self._stop_log_stream()
@@ -404,7 +420,7 @@ class MchostApp(App[None]):
         if not self.instances:
             await container.mount(
                 Static(
-                    "No instances yet.\n\n[dim]Create one with:[/]\n"
+                    "No instances yet.\n\n[dim]Click + New instance, or run:[/]\n"
                     "[bold]mchost new MyServer[/]",
                     classes="empty",
                 )
@@ -479,23 +495,44 @@ class MchostApp(App[None]):
         if not self.engine:
             return
         states: dict[str, str] = {}
+        started: dict[str, datetime] = {}
         for instance in self.instances:
             try:
                 states[instance.slug] = self.engine.state(instance.slug)
             except MchostError:
                 states[instance.slug] = "unknown"
-        self.call_from_thread(self._apply_states, states)
+                continue
+            if states[instance.slug] in ("running", "restarting"):
+                try:
+                    value = self.engine.started_at(instance.slug)
+                except (MchostError, OSError):
+                    value = None
+                if value is not None:
+                    started[instance.slug] = value
+        self.call_from_thread(self._apply_states, states, started)
 
-    def _apply_states(self, states: dict[str, str]) -> None:
+    def _apply_states(
+        self, states: dict[str, str], started: dict[str, datetime] | None = None
+    ) -> None:
         changed = False
         for slug, state in states.items():
             previous = self.states.get(slug)
             self.states[slug] = state
+            if state in ("running", "restarting"):
+                if started and slug in started:
+                    self._started_at[slug] = started[slug]
+            else:
+                self._started_at.pop(slug, None)
             row = self.rows.get(slug)
             if row:
                 row.set_state(state)
             if previous != state:
                 changed = True
+
+        for stale in set(self.states) - set(states):
+            self.states.pop(stale, None)
+        for stale in set(self._started_at) - set(states):
+            self._started_at.pop(stale, None)
 
         instance = self._selected()
         if instance:
@@ -503,6 +540,16 @@ class MchostApp(App[None]):
         self._set_buttons()
         if changed:
             self._sync_log_stream()
+
+    def _tick_uptime(self) -> None:
+        instance = self._selected()
+        if not instance:
+            return
+        if self.states.get(instance.slug) not in ("running", "restarting"):
+            return
+        if instance.slug not in self._started_at:
+            return
+        self._update_detail(instance)
 
     def _sync_log_stream(self) -> None:
         if not self.selected_slug:
@@ -519,6 +566,12 @@ class MchostApp(App[None]):
 
     # -- rendering ---------------------------------------------------------
 
+    def _uptime_label(self, instance: Instance) -> str | None:
+        if self.states.get(instance.slug) not in ("running", "restarting"):
+            return None
+        started = self._started_at.get(instance.slug)
+        return format_uptime(started) if started else None
+
     def _update_detail(self, instance: Instance) -> None:
         state = self.states.get(instance.slug, "unknown")
         color = STATE_COLORS.get(state, "dim")
@@ -531,10 +584,14 @@ class MchostApp(App[None]):
     def _overview(self, instance: Instance) -> Panel:
         state = self.states.get(instance.slug, "unknown")
         color = STATE_COLORS.get(state, "dim")
+        uptime = self._uptime_label(instance)
         table = Table.grid(padding=(0, 2))
         table.add_column(style="dim", no_wrap=True)
         table.add_column()
-        table.add_row("State", f"[{color}]{state}[/]")
+        state_text = f"[{color}]{state}[/]"
+        if uptime:
+            state_text += f" · up {uptime}"
+        table.add_row("State", state_text)
         table.add_row("Loader", LOADER_LABELS.get(instance.loader, instance.loader))
         table.add_row("Minecraft", instance.mc_version)
         table.add_row(
@@ -572,9 +629,8 @@ class MchostApp(App[None]):
         self.query_one("#overview", Static).update(
             Panel(
                 "No instances yet.\n\n"
-                "Create one from the shell:\n"
-                "[bold]mchost new MyServer --loader fabric --mc-version 1.20.4[/]\n\n"
-                "The in-app wizard arrives in phase 3.",
+                "Click [bold]+ New instance[/] in the sidebar, or run:\n"
+                "[bold]mchost new MyServer --loader fabric --mc-version 1.20.4[/]",
                 title="Welcome",
                 border_style="cyan",
             )
@@ -1431,7 +1487,7 @@ class MchostApp(App[None]):
         if instance.kind == "modpack":
             self.notify(
                 "Modpack versions are managed by their pack; "
-                "use the Modpacks tab (phase 5).",
+                "open the Modpacks tab to check for updates.",
                 timeout=7,
             )
             return

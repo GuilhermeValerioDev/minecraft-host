@@ -126,8 +126,9 @@ def migrate(layout: Layout) -> MigrationResult:
 
     if instance.loader_version is None and loader not in ("vanilla", "paper"):
         warnings.append(
-            f"{loader} loader version is not pinned yet; choose one before the "
-            "first start (the version picker arrives in phase 3)"
+            f"{loader} loader version is not pinned yet; choose one from the "
+            "dashboard's Version button or with 'mchost versions' before the "
+            "first start"
         )
     if mc_version == "LATEST":
         warnings.append("Minecraft version is not pinned; the server will use the latest")

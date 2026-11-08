@@ -73,3 +73,37 @@ def test_state_missing(tmp_path, monkeypatch):
         lambda *args, **kwargs: subprocess.CompletedProcess([], 0, "", ""),
     )
     assert engine.state("my-server") == "missing"
+
+
+def test_started_at_parses_docker_timestamp(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    engine = make_engine(tmp_path)
+    payload = "2026-01-01T12:00:00.123456789Z\n"
+    monkeypatch.setattr(
+        engine,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess([], 0, payload, ""),
+    )
+    value = engine.started_at("my-server")
+    assert value == datetime(
+        2026, 1, 1, 12, 0, 0, 123456, tzinfo=timezone.utc
+    )
+
+
+def test_started_at_missing_or_invalid(tmp_path, monkeypatch):
+    engine = make_engine(tmp_path)
+    for payload, returncode in (
+        ("", 0),
+        ("0001-01-01T00:00:00Z\n", 0),
+        ("not-a-date\n", 0),
+        ("2026-01-01T12:00:00Z\n", 1),
+    ):
+        monkeypatch.setattr(
+            engine,
+            "_run",
+            lambda *args, _p=payload, _r=returncode, **kwargs: subprocess.CompletedProcess(
+                [], _r, _p, ""
+            ),
+        )
+        assert engine.started_at("my-server") is None

@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -194,6 +196,32 @@ class Engine:
         # A restarting container is still "in use": its ports are held, and
         # the UI should keep tailing its logs.
         return self.state(slug).lower() in ("running", "restarting")
+
+    def started_at(self, slug: str) -> datetime | None:
+        """Return the container's last start time, if it is available."""
+        result = self._run(
+            [
+                self.info.binary,
+                "inspect",
+                "--format",
+                "{{.State.StartedAt}}",
+                self.container_name(slug),
+            ],
+            check=False,
+        )
+        text = (result.stdout or "").strip()
+        if result.returncode != 0 or not text or text.startswith("0001-01-01"):
+            return None
+        text = text.replace("Z", "+00:00")
+        # Docker timestamps can have nanoseconds; Python accepts microseconds.
+        text = re.sub(r"(\.\d{6})\d+", r"\1", text)
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
     def running_slugs(self) -> list[str]:
         return [slug for slug in instance_slugs(self.layout) if self.is_running(slug)]
