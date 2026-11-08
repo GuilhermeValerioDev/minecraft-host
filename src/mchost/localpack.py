@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Callable
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 import yaml
@@ -69,6 +69,7 @@ class LocalPackInfo:
     notes: str
     suggested_memory: str | None = None
     serverstarter: ServerStarterConfig | None = None
+    curseforge_files: int = 0
 
 
 def _archive_kind(path: Path) -> str:
@@ -266,6 +267,7 @@ def inspect_local_pack(path: Path) -> LocalPackInfo:
     mc_version: str | None = None
     pack_name = path.stem
     pack_version = ""
+    curseforge_files = 0
     notes: list[str] = []
 
     manifests = sorted(
@@ -300,6 +302,11 @@ def inspect_local_pack(path: Path) -> LocalPackInfo:
                             )
                 pack_name = str(manifest.get("name") or pack_name)
                 pack_version = str(manifest.get("version") or "")
+                if pack_version and pack_name.endswith(pack_version):
+                    pack_name = pack_name[: -len(pack_version)].rstrip(" -_")
+                files = manifest.get("files") or []
+                if isinstance(files, list):
+                    curseforge_files = len(files)
                 notes.append(
                     f"manifest.json: {loader or 'unknown loader'} "
                     f"{loader_version or ''} / MC {mc_version or 'unknown'}"
@@ -415,6 +422,7 @@ def inspect_local_pack(path: Path) -> LocalPackInfo:
         notes="; ".join(dict.fromkeys(notes)),
         suggested_memory=starter_config.max_ram if starter_config else None,
         serverstarter=starter_config,
+        curseforge_files=curseforge_files,
     )
 
 
@@ -496,16 +504,20 @@ def _download_file(url: str, destination: Path, *, retries: int = 2) -> Path:
 
 
 def _extract_overrides(
-    pack_path: Path, server: Path, ignore_patterns: tuple[str, ...] = ()
+    pack_path: Path,
+    server: Path,
+    ignore_patterns: tuple[str, ...] = (),
+    prefix: str = "overrides",
 ) -> None:
     root = server.resolve()
+    stem = prefix.strip("/") + "/"
     try:
         with zipfile.ZipFile(pack_path) as archive:
             for member in archive.infolist():
                 name = member.filename.replace("\\", "/")
-                if not name.startswith("overrides/") or name.endswith("/"):
+                if not name.startswith(stem) or name.endswith("/"):
                     continue
-                relative = name[len("overrides/") :]
+                relative = name[len(stem) :]
                 if not relative:
                     continue
                 if any(
@@ -527,6 +539,181 @@ def _extract_overrides(
                         pass
     except (OSError, zipfile.BadZipFile) as exc:
         raise MchostError(f"could not extract overrides: {exc}") from exc
+
+
+def _read_curseforge_manifest(path: Path) -> dict | None:
+    if _archive_kind(path) != "zip":
+        return None
+    try:
+        with zipfile.ZipFile(path) as archive:
+            raw = archive.read("manifest.json")
+        manifest = json.loads(raw)
+    except (OSError, KeyError, zipfile.BadZipFile, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    if manifest.get("manifestType") != "minecraftModpack":
+        return None
+    if not isinstance(manifest.get("files"), list):
+        return None
+    return manifest
+
+
+def _download_curseforge_file(
+    project_id: int, file_id: int, directory: Path, *, retries: int = 2
+) -> Path:
+    """Download via CurseForge's public website download endpoint.
+
+    Some CurseForge manifests omit ``downloadUrl``. The website endpoint
+    redirects to the CDN and includes the original filename in the redirect.
+    """
+    url = (
+        f"https://www.curseforge.com/api/v1/mods/{project_id}"
+        f"/files/{file_id}/download"
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    last_error: Exception | None = None
+    for _attempt in range(retries):
+        temporary: Path | None = None
+        try:
+            with httpx.stream(
+                "GET",
+                url,
+                headers={"User-Agent": USER_AGENT},
+                follow_redirects=True,
+                timeout=120,
+            ) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "").lower()
+                if content_type.startswith("text/html"):
+                    raise MchostError(
+                        f"CurseForge returned HTML for {project_id}/{file_id}"
+                    )
+                filename = Path(unquote(response.url.path)).name
+                if not filename:
+                    disposition = response.headers.get(
+                        "content-disposition", ""
+                    )
+                    match = re.search(
+                        r'filename="?([^";]+)"?', disposition
+                    )
+                    if match:
+                        filename = match.group(1)
+                if not filename:
+                    raise MchostError(
+                        f"could not determine filename for {project_id}/{file_id}"
+                    )
+                destination = directory / filename
+                if destination.is_file() and destination.stat().st_size > 0:
+                    return destination
+                temporary = destination.with_name(destination.name + ".part")
+                with temporary.open("wb") as handle:
+                    for chunk in response.iter_bytes(1024 * 256):
+                        handle.write(chunk)
+            temporary.replace(destination)
+            return destination
+        except (httpx.HTTPError, OSError, MchostError) as exc:
+            last_error = exc
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    raise MchostError(
+        f"could not download CurseForge file {project_id}/{file_id}: {last_error}"
+    )
+
+
+def _install_curseforge_manifest(
+    archive: Path,
+    manifest: dict,
+    pack_dir: Path,
+    server: Path,
+    progress: Callable[[int, int], None] | None = None,
+) -> tuple[str, str, str | None, str]:
+    """Install a CurseForge manifest pack without a ServerStarter config."""
+    prefix = str(manifest.get("overrides") or "overrides")
+    _extract_overrides(archive, server, (), prefix)
+
+    targets: list[tuple[str, object, object]] = []
+    for entry in manifest.get("files") or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            project_id = int(entry.get("projectID", 0))
+            file_id = int(entry.get("fileID", 0))
+        except (TypeError, ValueError):
+            continue
+        if not project_id or not file_id:
+            continue
+        download_url = entry.get("downloadUrl")
+        if download_url:
+            filename = Path(unquote(urlparse(str(download_url)).path)).name
+            if not filename:
+                continue
+            destination = server / "mods" / filename
+            if destination.exists():
+                continue
+            targets.append(("url", str(download_url), destination))
+        else:
+            targets.append(("curseforge", project_id, file_id))
+
+    total = len(targets)
+    if progress:
+        progress(0, total)
+    failures: list[str] = []
+    completed = 0
+    if targets:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = {}
+            for kind, first, second in targets:
+                if kind == "url":
+                    futures[
+                        pool.submit(_download_file, first, second)
+                    ] = (kind, first, second)
+                else:
+                    futures[
+                        pool.submit(
+                            _download_curseforge_file, first, second, server / "mods"
+                        )
+                    ] = (kind, first, second)
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except (MchostError, OSError) as exc:
+                    failures.append(str(exc))
+                completed += 1
+                if progress:
+                    progress(completed, total)
+    if failures:
+        raise MchostError(
+            f"{len(failures)} mod downloads failed; first error: {failures[0]}"
+        )
+
+    minecraft = manifest.get("minecraft") or {}
+    if not isinstance(minecraft, dict):
+        minecraft = {}
+    mc_version = str(minecraft.get("version") or "") or "LATEST"
+    loader = "vanilla"
+    loader_version = None
+    mod_loaders = minecraft.get("modLoaders") or []
+    if isinstance(mod_loaders, list) and mod_loaders:
+        chosen = next(
+            (
+                item
+                for item in mod_loaders
+                if isinstance(item, dict) and item.get("primary")
+            ),
+            mod_loaders[0] if isinstance(mod_loaders[0], dict) else None,
+        )
+        if isinstance(chosen, dict):
+            loader, loader_version = _loader_from_id(
+                str(chosen.get("id") or "")
+            )
+            loader = loader or "vanilla"
+    return (
+        loader,
+        mc_version,
+        loader_version,
+        str(manifest.get("version") or ""),
+    )
 
 
 def _install_serverstarter(
@@ -696,12 +883,19 @@ def install_local_pack(
         server.mkdir(parents=True, exist_ok=True)
         pack_version = info.pack_version
         pack_url = ""
+        manifest = _read_curseforge_manifest(archive)
 
         if info.serverstarter is not None:
             loader, mc_version, loader_version, pack_version = (
                 _install_serverstarter(info, pack_dir, server, progress)
             )
             pack_url = info.serverstarter.modpack_url
+        elif manifest is not None:
+            loader, mc_version, loader_version, pack_version = (
+                _install_curseforge_manifest(
+                    archive, manifest, pack_dir, server, progress
+                )
+            )
         else:
             tmp = instance_dir / ".extract"
             tmp.mkdir()

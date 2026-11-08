@@ -69,7 +69,7 @@ minecraft-host/
 │   ├── instances.py       # lifecycle helpers (delete)
 │   ├── cli.py             # mchost commands
 │   └── tui/               # Textual dashboard, modals, theme
-├── tests/                 # 119 tests; mostly no Docker required
+├── tests/                 # 121 tests; mostly no Docker required
 ├── docs/screenshots/
 ├── instances/<slug>/      # per-instance config, compose, pack, data
 ├── backups/<slug>/        # per-instance backup archives
@@ -451,6 +451,10 @@ yourself, then use **Modpacks → Install CurseForge pack** in the dashboard (or
 - for ServerStarter packs, downloads the referenced pack archive, extracts its
   `overrides/`, and downloads the server mods listed in the CurseForge manifest
   into `mods/` (client-only projects and ignored file patterns are skipped);
+- for ordinary CurseForge packs (client or server zips with `manifest.json` and
+  no `downloadUrl` entries), resolves each `projectID`/`fileID` through
+  CurseForge’s public file endpoint, extracts `overrides/`, and downloads the
+  mods into `mods/`;
 - extracts ordinary archives into `instances/<slug>/server/`, flattening a
   single top-level wrapper folder;
 - keeps the original archive and any downloaded pack archive in
@@ -468,6 +472,10 @@ mchost modpack local ~/Downloads/Craftoria-Server-1.37.0.zip
 A ServerStarter install can take a while: the pack’s referenced mods are
 downloaded from the URLs in its manifest, with progress shown in the dashboard.
 The first install of a large pack can be several hundred MB.
+
+Client packs are accepted too. A client pack has no server-side ignore list, so
+all listed mods are downloaded; disable any client-only mods from the Mods tab
+if the server rejects them.
 
 Local packs are marked `source = "local"` in `instance.toml`; the Modpacks tab
 shows them as local and disables the Modrinth update/link actions. To update

@@ -191,6 +191,11 @@ class LocalPackInstaller(ModalScreen[str | None]):
                 "\nServerStarter pack: mods and overrides are downloaded "
                 "during install."
             )
+        elif info.curseforge_files:
+            note += (
+                f"\nCurseForge manifest: {info.curseforge_files} mods will be "
+                "downloaded during install."
+            )
         self.query_one("#local-info", Static).update(
             f"{note}\n"
             f"Pack version: {info.pack_version or 'unknown'}"

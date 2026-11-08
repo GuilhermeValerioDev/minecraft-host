@@ -241,3 +241,82 @@ def test_install_serverstarter_downloads_mods_and_overrides(tmp_path, monkeypatc
     assert "NEOFORGE_VERSION: 21.1.249" in compose
     assert "GENERIC_PACK" not in compose
     assert (layout.pack_dir(loaded.slug) / "Craftoria-1.37.0.zip").is_file()
+
+
+def make_curseforge_client_pack(tmp_path):
+    manifest = {
+        "manifestType": "minecraftModpack",
+        "manifestVersion": 1,
+        "name": "New Age",
+        "version": "1.4.2",
+        "minecraft": {
+            "version": "1.21.1",
+            "modLoaders": [{"id": "neoforge-21.1.250", "primary": True}],
+        },
+        "overrides": "overrides",
+        "files": [
+            {"projectID": 1, "fileID": 11, "required": True},
+            {"projectID": 2, "fileID": 22, "required": True},
+        ],
+    }
+    archive = tmp_path / "new-age.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        handle.writestr("manifest.json", json.dumps(manifest))
+        handle.writestr("overrides/config/example.toml", "a = 1\n")
+        handle.writestr("overrides/mods/override.jar", b"override")
+    return archive
+
+
+def test_inspect_curseforge_client_pack(tmp_path):
+    archive = make_curseforge_client_pack(tmp_path)
+    info = inspect_local_pack(archive)
+    assert info.name == "New Age"
+    assert info.pack_version == "1.4.2"
+    assert info.loader == "neoforge"
+    assert info.loader_version == "21.1.250"
+    assert info.mc_version == "1.21.1"
+    assert info.curseforge_files == 2
+    assert info.serverstarter is None
+
+
+def test_install_curseforge_client_pack_downloads_mods(tmp_path, monkeypatch):
+    layout = Layout(tmp_path)
+    layout.ensure()
+    archive = make_curseforge_client_pack(tmp_path)
+
+    def fake_curseforge(project_id, file_id, directory, *, retries=2):
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / f"mod-{project_id}.jar"
+        destination.write_bytes(b"jar")
+        return destination
+
+    monkeypatch.setattr(
+        "mchost.localpack._download_curseforge_file", fake_curseforge
+    )
+
+    instance = install_local_pack(
+        layout,
+        archive,
+        name="New Age",
+        loader="neoforge",
+        mc_version="1.21.1",
+        loader_version="21.1.250",
+    )
+
+    loaded = load_instance(layout, instance.slug)
+    assert loaded.kind == "modpack"
+    assert loaded.modpack.source == "local"
+    assert loaded.modpack.version_number == "1.4.2"
+    assert loaded.loader == "neoforge"
+    assert loaded.mc_version == "1.21.1"
+    assert loaded.loader_version == "21.1.250"
+    server = layout.server_dir_for(loaded)
+    assert (server / "mods/mod-1.jar").is_file()
+    assert (server / "mods/mod-2.jar").is_file()
+    assert (server / "mods/override.jar").is_file()
+    assert (server / "config/example.toml").is_file()
+    compose = layout.compose_file(loaded.slug).read_text(encoding="utf-8")
+    assert "TYPE: NEOFORGE" in compose
+    assert "VERSION: 1.21.1" in compose
+    assert "NEOFORGE_VERSION: 21.1.250" in compose
+    assert "GENERIC_PACK" not in compose
