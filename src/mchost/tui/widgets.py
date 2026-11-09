@@ -95,8 +95,7 @@ class ContextMenu(ModalScreen[None]):
             yield Button("Start", id="ctx-start", variant="success")
             yield Button("Stop", id="ctx-stop", variant="error")
             yield Button("Restart", id="ctx-restart")
-            yield Button("Change version", id="ctx-version")
-            yield Button("Change memory", id="ctx-memory")
+            yield Button("Edit instance", id="ctx-edit")
             yield Button("Backup", id="ctx-backup")
             yield Button("Reveal data", id="ctx-reveal")
             yield Button(

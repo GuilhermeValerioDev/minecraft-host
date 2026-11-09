@@ -58,11 +58,10 @@ from ..modrinth import (
 from .widgets import ConfirmDialog, ConfirmSwitch, ContextMenu, InstanceRow
 from .new_instance import NewInstanceWizard
 from .new_instance_chooser import NewInstanceChooser
-from .version_picker import VersionPicker
 from .modpack_browser import ModpackBrowser
 from .config_editor import ConfigEditor
 from .local_pack_installer import LocalPackInstaller
-from .memory_editor import MemoryEditor
+from .edit_instance import EditInstance
 
 STATE_COLORS = {
     "running": "green",
@@ -192,8 +191,7 @@ class MchostApp(App[None]):
         Binding("s", "start", "Start"),
         Binding("x", "stop", "Stop"),
         Binding("r", "restart", "Restart"),
-        Binding("v", "version", "Version"),
-        Binding("m", "memory", "Memory"),
+        Binding("e", "edit_instance", "Edit"),
         Binding("b", "backup", "Backup"),
         Binding("n", "new", "New"),
         Binding("f5", "refresh", "Refresh"),
@@ -217,6 +215,7 @@ class MchostApp(App[None]):
         self._log_history: list[str] = []
         self._modpack_link: str | None = None
         self._started_at: dict[str, datetime] = {}
+        self._file_meta: dict[str, dict[str, object]] = {}
 
     # -- layout ------------------------------------------------------------
 
@@ -234,12 +233,18 @@ class MchostApp(App[None]):
                     yield Button("Start", id="btn-start", variant="success")
                     yield Button("Stop", id="btn-stop", variant="error")
                     yield Button("Restart", id="btn-restart")
-                    yield Button("Version", id="btn-version")
+                    yield Button("Edit", id="btn-edit")
                     yield Button("⋯", id="btn-more", tooltip="More actions")
                     yield Button("⌘", id="btn-commands", tooltip="Command palette")
                 with TabbedContent(id="tabs"):
                     with TabPane("Overview", id="tab-overview"):
-                        yield Static(id="overview")
+                        with Vertical(id="overview-pane"):
+                            yield Static(id="overview")
+                            with Horizontal(id="overview-actions"):
+                                yield Button(
+                                    "Edit server.properties",
+                                    id="edit-server-properties",
+                                )
                     with TabPane("Console", id="tab-console"):
                         with Vertical(id="console-pane"):
                             yield RichLog(id="console-log", wrap=True, markup=False)
@@ -260,6 +265,11 @@ class MchostApp(App[None]):
                         with Vertical(classes="file-pane"):
                             with Horizontal(classes="file-toolbar"):
                                 yield Static("", id="mods-summary", classes="file-summary")
+                                yield Input(
+                                    placeholder="Filter mods…",
+                                    id="mods-filter",
+                                    classes="file-filter",
+                                )
                                 yield Button("Refresh", id="mods-refresh")
                             yield DataTable(
                                 id="mods-table",
@@ -289,6 +299,11 @@ class MchostApp(App[None]):
                             with Horizontal(classes="file-toolbar"):
                                 yield Static(
                                     "", id="configs-summary", classes="file-summary"
+                                )
+                                yield Input(
+                                    placeholder="Filter configs…",
+                                    id="configs-filter",
+                                    classes="file-filter",
                                 )
                                 yield Button("Refresh", id="configs-refresh")
                             yield DataTable(
@@ -453,6 +468,11 @@ class MchostApp(App[None]):
         instance = self._selected()
         if instance:
             self._update_detail(instance)
+        for filter_id in ("mods-filter", "configs-filter"):
+            try:
+                self.query_one(f"#{filter_id}", Input).value = ""
+            except Exception:
+                pass
         active = self.query_one(TabbedContent).active
         if active == "tab-mods":
             self._refresh_folder("mods")
@@ -648,10 +668,7 @@ class MchostApp(App[None]):
         self.query_one("#btn-start", Button).disabled = not available or active
         self.query_one("#btn-stop", Button).disabled = not available or not active
         self.query_one("#btn-restart", Button).disabled = not available
-        instance = self._selected()
-        self.query_one("#btn-version", Button).disabled = (
-            not available or instance is None or instance.kind == "modpack"
-        )
+        self.query_one("#btn-edit", Button).disabled = not available
         self.query_one("#btn-more", Button).disabled = not has_instance
     # -- logs --------------------------------------------------------------
 
@@ -1085,7 +1102,24 @@ class MchostApp(App[None]):
     ) -> None:
         if slug != self.selected_slug:
             return
+        self._file_meta[kind] = {
+            "slug": slug,
+            "path": path,
+            "entries": entries,
+            "truncated": truncated,
+            "error": error,
+        }
+        self._render_file_table(kind)
+
+    def _render_file_table(self, kind: str) -> None:
+        meta = self._file_meta.get(kind)
+        if not meta or meta.get("slug") != self.selected_slug:
+            return
         folder = "mods" if kind == "mods" else "config"
+        path = meta["path"]
+        entries = list(meta["entries"])
+        truncated = bool(meta["truncated"])
+        error = meta["error"]
         table = self.query_one(f"#{kind}-table", DataTable)
         summary = self.query_one(f"#{kind}-summary", Static)
         table.clear()
@@ -1105,7 +1139,11 @@ class MchostApp(App[None]):
             self._refresh_file_actions(kind)
             return
 
-        for relative, size, modified in entries:
+        query = self.query_one(f"#{kind}-filter", Input).value.strip().lower()
+        shown = [
+            entry for entry in entries if not query or query in entry[0].lower()
+        ]
+        for relative, size, modified in shown:
             state = "—"
             if kind == "mods":
                 state = (
@@ -1120,9 +1158,17 @@ class MchostApp(App[None]):
                 state,
             )
         total = sum(size for _, size, _ in entries)
-        label = f"{len(entries)} file" + ("" if len(entries) == 1 else "s")
         extra = " · showing the first 500" if truncated else ""
-        summary.update(f"{label} · {format_size(total)}{extra}")
+        if query:
+            label = (
+                f"{len(shown)} of {len(entries)} files match"
+                if shown
+                else f"No files match {query!r} ({len(entries)} total)"
+            )
+            summary.update(f"{label} · {format_size(total)}{extra}")
+        else:
+            label = f"{len(entries)} file" + ("" if len(entries) == 1 else "s")
+            summary.update(f"{label} · {format_size(total)}{extra}")
         self._refresh_file_actions(kind)
 
     def _file_root(self, kind: str) -> Path | None:
@@ -1256,6 +1302,27 @@ class MchostApp(App[None]):
             ConfigEditor(path, relative, text), self._config_saved
         )
 
+    def _edit_server_properties(self) -> None:
+        instance = self._selected()
+        if not instance:
+            self.notify("Select an instance first.", timeout=4)
+            return
+        path = self.layout.server_dir_for(instance) / "server.properties"
+        if not path.is_file():
+            self.notify(
+                "No server.properties yet. Start the server once to generate it.",
+                timeout=6,
+            )
+            return
+        try:
+            text = read_text_file(path)
+        except MchostError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self.push_screen(
+            ConfigEditor(path, "server.properties", text), self._config_saved
+        )
+
     def _config_saved(self, saved: bool | None) -> None:
         if not saved:
             return
@@ -1305,38 +1372,40 @@ class MchostApp(App[None]):
         self._refresh_backups()
         self._start_backup("world")
 
-    def action_version(self) -> None:
+    def action_edit_instance(self) -> None:
         if self._typing() or not self.selected_slug:
             return
-        self.show_version_picker()
+        self.show_edit_instance()
 
-    def action_memory(self) -> None:
-        if self._typing() or not self.selected_slug:
-            return
-        self.show_memory_editor()
-
-    def show_memory_editor(self) -> None:
+    def show_edit_instance(self) -> None:
         instance = self._selected()
         if not instance:
             self.notify("Select an instance first.", timeout=4)
             return
         self.push_screen(
-            MemoryEditor(self.layout, instance), self._memory_updated
+            EditInstance(self.layout, instance), self._edit_instance_updated
         )
 
-    def _show_memory_for(self, slug: str) -> None:
+    def _edit_for(self, slug: str) -> None:
         self.select_instance(slug)
-        self.show_memory_editor()
+        self.show_edit_instance()
 
-    def _memory_updated(self, updated: bool | None) -> None:
+    def _edit_instance_updated(self, updated: bool | None) -> None:
         if not updated:
             return
-        instance = self._selected()
-        if instance:
-            self._update_detail(instance)
         self.notify(
-            "Memory updated. Restart the instance to apply it.", timeout=6
+            "Instance updated. Restart the server to apply changes.",
+            timeout=6,
         )
+        self.run_worker(self._reload_after_edit())
+
+    async def _reload_after_edit(self) -> None:
+        self._load_instances()
+        await self._rebuild_sidebar()
+        if self.selected_slug in self.rows:
+            self.select_instance(self.selected_slug)
+        self._set_buttons()
+        self._poll_states()
 
     def action_modpack_browser(self) -> None:
         if self._typing():
@@ -1395,7 +1464,7 @@ class MchostApp(App[None]):
     def action_help(self) -> None:
         if not self._typing():
             self.notify(
-                "s start · x stop · r restart · b backup · n new · "
+                "s start · x stop · r restart · e edit · b backup · n new · "
                 "F5 refresh · Ctrl+P commands",
                 timeout=8,
             )
@@ -1419,7 +1488,7 @@ class MchostApp(App[None]):
         self.notify("Refreshed.", timeout=2)
 
     def handle_row_action(self, slug: str, action: str) -> None:
-        if action in ("start", "stop", "restart", "version"):
+        if action in ("start", "stop", "restart", "edit"):
             self.select_instance(slug)
         if action == "start":
             self._request_start(slug)
@@ -1427,10 +1496,8 @@ class MchostApp(App[None]):
             self._request_stop(slug)
         elif action == "restart":
             self._request_restart(slug)
-        elif action == "version":
-            self.show_version_picker()
-        elif action == "memory":
-            self.show_memory_editor()
+        elif action == "edit":
+            self.show_edit_instance()
         elif action == "backup":
             self.select_instance(slug)
             self.query_one(TabbedContent).active = "tab-backups"
@@ -1489,38 +1556,6 @@ class MchostApp(App[None]):
         else:
             self.selected_slug = None
             self._show_empty()
-        self._set_buttons()
-        self._poll_states()
-
-    def show_version_picker(self) -> None:
-        instance = self._selected()
-        if not instance:
-            self.notify("Select an instance first.", timeout=4)
-            return
-        if instance.kind == "modpack":
-            self.notify(
-                "Modpack versions are managed by their pack; "
-                "open the Modpacks tab to check for updates.",
-                timeout=7,
-            )
-            return
-        self.push_screen(
-            VersionPicker(self.layout, instance), self._version_updated
-        )
-
-    def _version_updated(self, updated: bool | None) -> None:
-        if not updated:
-            return
-        self.notify(
-            "Version updated. Restart the instance to apply it.", timeout=6
-        )
-        self.run_worker(self._reload_after_version())
-
-    async def _reload_after_version(self) -> None:
-        self._load_instances()
-        await self._rebuild_sidebar()
-        if self.selected_slug in self.rows:
-            self.select_instance(self.selected_slug)
         self._set_buttons()
         self._poll_states()
 
@@ -1669,6 +1704,12 @@ class MchostApp(App[None]):
         if event.input.id == "console-input":
             self._send_console()
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "mods-filter":
+            self._render_file_table("mods")
+        elif event.input.id == "configs-filter":
+            self._render_file_table("configs")
+
     def _send_console(self) -> None:
         if not self.selected_slug:
             self.notify("Select an instance first.", timeout=4)
@@ -1712,8 +1753,10 @@ class MchostApp(App[None]):
             self.action_stop()
         elif button_id == "btn-restart":
             self.action_restart()
-        elif button_id == "btn-version":
-            self.action_version()
+        elif button_id == "btn-edit":
+            self.action_edit_instance()
+        elif button_id == "edit-server-properties":
+            self._edit_server_properties()
         elif button_id == "btn-more":
             if self.selected_slug:
                 self.show_context_menu(self.selected_slug)
@@ -1795,9 +1838,9 @@ class MchostApp(App[None]):
                 lambda item=instance: self.select_instance(item.slug),
             )
             yield SystemCommand(
-                f"Change memory for {instance.name}",
-                "Edit the Java heap for this instance",
-                lambda item=instance: self._show_memory_for(item.slug),
+                f"Edit {instance.name}",
+                "Edit name, memory, Minecraft version, and loader build",
+                lambda item=instance: self._edit_for(item.slug),
             )
 
 

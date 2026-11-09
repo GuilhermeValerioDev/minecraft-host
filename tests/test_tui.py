@@ -12,12 +12,11 @@ from mchost.paths import Layout
 from mchost.tui.app import MchostApp
 from mchost.tui.new_instance import NewInstanceWizard
 from mchost.tui.new_instance_chooser import NewInstanceChooser
-from mchost.tui.version_picker import VersionPicker
 from mchost.tui.widgets import ConfirmDialog, ConfirmSwitch, ContextMenu
 from mchost.tui.modpack_browser import ModpackBrowser
 from mchost.tui.config_editor import ConfigEditor
 from mchost.tui.local_pack_installer import LocalPackInstaller
-from mchost.tui.memory_editor import MemoryEditor
+from mchost.tui.edit_instance import EditInstance
 from mchost.modrinth import (
     InstallResult,
     ModrinthFile,
@@ -214,18 +213,7 @@ def test_starting_another_instance_asks_to_switch(tmp_path):
     asyncio.run(run())
 
 
-def test_context_menu_change_version_opens_picker(tmp_path, monkeypatch):
-    import mchost.tui.version_picker as picker_module
-
-    monkeypatch.setattr(
-        picker_module, "supported_mc_versions", lambda loader: ["1.21.1", "1.20.4"]
-    )
-    monkeypatch.setattr(
-        picker_module,
-        "loader_builds",
-        lambda loader, mc: [LoaderBuild("21.1.80", recommended=True, latest=True)],
-    )
-
+def test_context_menu_edit_opens_instance_editor(tmp_path):
     app, _fake = make_app(tmp_path)
 
     async def run():
@@ -234,9 +222,9 @@ def test_context_menu_change_version_opens_picker(tmp_path, monkeypatch):
             app.show_context_menu("demo")
             await pilot.pause(0.2)
             assert isinstance(app.screen, ContextMenu)
-            await pilot.click("#ctx-version")
+            await pilot.click("#ctx-edit")
             await pilot.pause(0.4)
-            assert isinstance(app.screen, VersionPicker)
+            assert isinstance(app.screen, EditInstance)
             await pilot.press("escape")
             await pilot.pause(0.1)
 
@@ -437,6 +425,74 @@ def test_mods_tab_can_disable_and_delete(tmp_path):
     asyncio.run(run())
 
 
+def test_mods_and_configs_filters(tmp_path):
+    app, _fake = make_app(tmp_path)
+    server = app.layout.server_dir("demo")
+    (server / "mods").mkdir(parents=True)
+    (server / "mods" / "example.jar").write_bytes(b"x")
+    (server / "mods" / "other.jar").write_bytes(b"x")
+    (server / "config").mkdir(parents=True)
+    (server / "config" / "example.toml").write_text("a = 1\n", encoding="utf-8")
+    (server / "config" / "other.toml").write_text("b = 1\n", encoding="utf-8")
+
+    async def run():
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause(0.2)
+            app.query_one(TabbedContent).active = "tab-mods"
+            await pilot.pause(0.5)
+            mods = app.query_one("#mods-table", DataTable)
+            assert mods.row_count == 2
+
+            filt = app.query_one("#mods-filter", Input)
+            filt.value = "example"
+            await pilot.pause(0.2)
+            assert mods.row_count == 1
+
+            filt.value = "nothing"
+            await pilot.pause(0.2)
+            assert mods.row_count == 0
+            summary = app.query_one("#mods-summary", Static)
+            assert "No files match" in str(summary.content)
+
+            filt.value = ""
+            await pilot.pause(0.2)
+            assert mods.row_count == 2
+
+            app.query_one(TabbedContent).active = "tab-configs"
+            await pilot.pause(0.5)
+            configs = app.query_one("#configs-table", DataTable)
+            assert configs.row_count == 2
+            app.query_one("#configs-filter", Input).value = "other"
+            await pilot.pause(0.2)
+            assert configs.row_count == 1
+
+    asyncio.run(run())
+
+
+def test_overview_server_properties_button(tmp_path):
+    app, _fake = make_app(tmp_path)
+    server = app.layout.server_dir("demo")
+    server.mkdir(parents=True, exist_ok=True)
+    properties = server / "server.properties"
+    properties.write_text("motd=before\n", encoding="utf-8")
+
+    async def run():
+        async with app.run_test(size=(120, 44)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.click("#edit-server-properties")
+            await pilot.pause(0.3)
+            assert isinstance(app.screen, ConfigEditor)
+            from textual.widgets import TextArea
+
+            app.screen.query_one("#editor-area", TextArea).text = "motd=after\n"
+            await pilot.click("#editor-save")
+            await pilot.pause(0.3)
+            assert not isinstance(app.screen, ConfigEditor)
+
+    asyncio.run(run())
+    assert properties.read_text(encoding="utf-8") == "motd=after\n"
+
+
 def test_configs_tab_can_edit(tmp_path):
     app, _fake = make_app(tmp_path)
     config = app.layout.server_dir("demo") / "config"
@@ -468,7 +524,7 @@ def test_configs_tab_can_edit(tmp_path):
     assert config_file.read_text(encoding="utf-8") == "a = 2\n"
 
 
-def test_memory_editor_works_for_modpacks(tmp_path):
+def test_edit_instance_updates_local_modpack(tmp_path):
     from mchost.compose import write_compose
     from mchost.config import Instance, ModpackConfig, load_instance, save_instance
 
@@ -486,13 +542,19 @@ def test_memory_editor_works_for_modpacks(tmp_path):
         java_version=17,
         rcon_password="secret",
         modpack=ModpackConfig(
-            project="test-pack",
-            version_id="v1",
+            source="local",
+            project="Test Pack",
+            version_id="",
             version_number="1.0.0",
             mode="server",
-            file_name="pack.mrpack",
-            file_kind="mrpack",
+            file_name="pack.zip",
+            file_kind="zip",
             sha512="abc",
+            resolved={
+                "minecraft": "1.20.1",
+                "loader": "fabric",
+                "loader_version": "0.15.0",
+            },
         ),
     )
     save_instance(layout, pack)
@@ -502,19 +564,31 @@ def test_memory_editor_works_for_modpacks(tmp_path):
         async with app.run_test(size=(120, 44)) as pilot:
             await pilot.pause(0.2)
             app.select_instance("pack")
-            app.action_memory()
+            app.action_edit_instance()
             await pilot.pause(0.3)
-            assert isinstance(app.screen, MemoryEditor)
-            app.screen.query_one("#memory-value", Input).value = "10G"
-            await pilot.click("#memory-apply")
+            assert isinstance(app.screen, EditInstance)
+            app.screen.query_one("#edit-name", Input).value = "Renamed Pack"
+            app.screen.query_one("#edit-memory", Input).value = "10G"
+            app.screen.query_one("#edit-mc", Input).value = "1.21.1"
+            app.screen.query_one("#edit-loader-version", Input).value = "0.16.0"
+            await pilot.click("#edit-apply")
             await pilot.pause(0.3)
-            assert not isinstance(app.screen, MemoryEditor)
+            assert not isinstance(app.screen, EditInstance)
 
     asyncio.run(run())
     loaded = load_instance(layout, "pack")
+    assert loaded.name == "Renamed Pack"
     assert loaded.memory == "10G"
+    assert loaded.mc_version == "1.21.1"
+    assert loaded.loader_version == "0.16.0"
+    assert loaded.java_version == 21
+    assert loaded.modpack.resolved["minecraft"] == "1.21.1"
+    assert loaded.modpack.resolved["loader_version"] == "0.16.0"
     compose = layout.compose_file("pack").read_text(encoding="utf-8")
     assert "MEMORY: 10G" in compose
+    assert "TYPE: FABRIC" in compose
+    assert "VERSION: 1.21.1" in compose
+    assert "FABRIC_LOADER_VERSION: 0.16.0" in compose
 
 
 def test_local_curseforge_pack_installer(tmp_path):
@@ -872,47 +946,33 @@ def test_new_instance_wizard_creates_instance(tmp_path, monkeypatch):
     assert app.selected_slug == "wizard-server"
 
 
-def test_version_picker_updates_instance(tmp_path, monkeypatch):
-    import mchost.tui.version_picker as picker_module
-
-    def fake_versions(loader):
-        return ["1.21.1", "1.20.4"]
-
-    def fake_builds(loader, mc_version):
-        if mc_version == "1.21.1":
-            return [LoaderBuild("21.1.80", recommended=True, latest=True)]
-        return [LoaderBuild("47.1.106", recommended=True, latest=True)]
-
-    monkeypatch.setattr(picker_module, "supported_mc_versions", fake_versions)
-    monkeypatch.setattr(picker_module, "loader_builds", fake_builds)
-
+def test_edit_instance_updates_server(tmp_path):
     app, _fake = make_app(tmp_path)
 
     async def run():
-        async with app.run_test(size=(120, 40)) as pilot:
+        async with app.run_test(size=(120, 44)) as pilot:
             await pilot.pause(0.2)
-            app.show_version_picker()
-            await pilot.pause(0.5)
-            picker = app.screen
-            assert isinstance(picker, VersionPicker)
-            assert picker.selected_mc == "1.20.4"
-            assert picker.selected_build == "47.1.106"
-            assert picker.query_one("#mc-list").option_count == 2
-
-            picker.selected_mc = "1.21.1"
-            picker._load_builds("1.21.1")
+            app.action_edit_instance()
+            await pilot.pause(0.3)
+            assert isinstance(app.screen, EditInstance)
+            app.screen.query_one("#edit-name", Input).value = "Renamed"
+            app.screen.query_one("#edit-memory", Input).value = "8G"
+            app.screen.query_one("#edit-mc", Input).value = "1.21.1"
+            app.screen.query_one("#edit-loader-version", Input).value = "0.16.0"
+            await pilot.click("#edit-apply")
             await pilot.pause(0.4)
-            assert picker.selected_build == "21.1.80"
-
-            await pilot.click("#picker-apply")
-            await pilot.pause(0.5)
-            assert not isinstance(app.screen, VersionPicker)
+            assert not isinstance(app.screen, EditInstance)
 
     asyncio.run(run())
 
     from mchost.config import load_instance
 
     loaded = load_instance(app.layout, "demo")
+    assert loaded.name == "Renamed"
+    assert loaded.memory == "8G"
     assert loaded.mc_version == "1.21.1"
-    assert loaded.loader_version == "21.1.80"
+    assert loaded.loader_version == "0.16.0"
     assert loaded.java_version == 21
+    compose = app.layout.compose_file("demo").read_text(encoding="utf-8")
+    assert "MEMORY: 8G" in compose
+    assert "FABRIC_LOADER_VERSION: 0.16.0" in compose

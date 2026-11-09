@@ -15,18 +15,18 @@ dashboard does is also available as a scriptable command.
 - 🐳 Docker and Podman compatible
 - 🎮 Vanilla, Paper, Fabric, Quilt, Forge, and NeoForge
 - 📌 Pin the exact Minecraft version and loader build for every instance
-- 🧭 In-app MC × loader picker with latest/recommended markers
+- ✏️ Edit instance name, memory, Minecraft version, and loader build in one form
 - 📦 Multiple instances, one running at a time (stable ports, no surprises)
 - 🖥️ Mouse-first terminal dashboard with sidebar, tabs, live logs, and RCON console
 - ⏱️ Live uptime clock in the Overview while an instance is running
 - ➕ Add-instance chooser: custom server, Modrinth pack, or local CurseForge pack
-- 📂 Mods and Configs tabs: enable/disable/delete mods and edit configs in-app
+- 📂 Mods and Configs tabs: search, enable/disable/delete mods, and edit configs in-app
 - 💾 World and full backups with RCON-safe snapshots, retention, and restore
 - 🧩 Modrinth modpack browser with server-pack preference and SHA-512 pinning
 - ⬆️ Modpack update checks and in-place updates, with the pack's Modrinth link
 - 📥 Install local CurseForge server packs you downloaded yourself
 - 🗑️ Delete an instance, its data, and its backups with confirmation
-- 🎚️ Change the Java heap post-creation, including for prebuilt modpacks
+- 🎚️ Change the Java heap post-creation, even for imported prebuilt packs
 - ⌨️ Full keyboard shortcuts and a `Ctrl+P` command palette
 - 🖱️ Right-click context menus and header action buttons
 - 🧾 Scriptable CLI: create, start, stop, switch, logs, RCON commands
@@ -45,9 +45,9 @@ dashboard does is also available as a scriptable command.
 | --- | --- |
 | ![Dashboard](docs/screenshots/dashboard.png) | ![Modrinth browser](docs/screenshots/modpack-browser.png) |
 
-| Version picker | Local CurseForge pack |
+| Edit instance | Local CurseForge pack |
 | --- | --- |
-| ![Version picker](docs/screenshots/version-picker.png) | ![Local pack installer](docs/screenshots/local-pack.png) |
+| ![Edit instance](docs/screenshots/edit-instance.png) | ![Local pack installer](docs/screenshots/local-pack.png) |
 
 _Demo data. The dashboard is fully operable with a mouse._
 
@@ -69,7 +69,7 @@ minecraft-host/
 │   ├── instances.py       # lifecycle helpers (delete)
 │   ├── cli.py             # mchost commands
 │   └── tui/               # Textual dashboard, modals, theme
-├── tests/                 # 121 tests; mostly no Docker required
+├── tests/                 # 123 tests; mostly no Docker required
 ├── docs/screenshots/
 ├── instances/<slug>/      # per-instance config, compose, pack, data
 ├── backups/<slug>/        # per-instance backup archives
@@ -139,28 +139,32 @@ In the dashboard:
 - Click `+ New instance` (or press `n`) and choose **Custom server**,
   **Modrinth pack**, or **CurseForge pack**. Custom opens the version wizard;
   Modrinth opens the browser; CurseForge opens the local-archive installer.
-- Use the header buttons for Start / Stop / Restart / Version.
-- Right-click a row for Start, Stop, Restart, Change version, Backup, and Reveal data.
+- Use the header buttons for Start / Stop / Restart / Edit.
+- Right-click a row for Start, Stop, Restart, Edit instance, Backup, and Reveal data.
 - Click tabs to switch between Overview, Console, Logs, Mods, Configs, Backups,
   and Modpacks.
-- **Mods**: select a file to Enable/Disable (renames with `.disabled`) or Delete.
-  The server must be stopped for changes.
-- **Configs**: select a file and click Edit for an in-app text editor. Changes
-  apply on the next restart.
+- **Mods**: use the filter box to search the list, then select a file to
+  Enable/Disable (renames with `.disabled`) or Delete. The server must be
+  stopped for changes.
+- **Configs**: use the filter box to search, then select a file and click Edit
+  for an in-app text editor. Changes apply on the next restart.
 - **Backups**: create world/full backups, restore, delete, and reveal.
 - **Modpacks**: browse Modrinth, install a pack, check for updates, update in
   place, copy the pack's Modrinth link, or install a local CurseForge server
   pack you downloaded.
 - The **Overview** shows status, loader/MC, ports, memory, and a live uptime
-  clock while the server is running.
-- **Memory**: right-click a row → **Change memory**, or press `m`. Works for
-  hand-built servers and prebuilt modpacks; restart to apply.
+  clock while the server is running. Use **Edit server.properties** there to
+  open the file in the in-app editor (start the server once if it does not
+  exist yet).
+- **Edit instance**: click `Edit`, press `e`, or right-click → **Edit instance**
+  to change the display name, Java heap, Minecraft version, and loader build.
+  This also works for imported prebuilt packs; restart to apply runtime changes.
 - **Delete**: right-click an instance and choose **Delete instance**. The
   confirmation lists the instance, data, and backup paths; deleting stops the
   container and removes all three.
 - Click `Ctrl+P` or the `⌘` button for the command palette.
-- Keyboard: `s` start, `x` stop, `r` restart, `v` version, `m` memory,
-  `b` backup, `n` new, `F5` refresh, `?` help, `q` quit.
+- Keyboard: `s` start, `x` stop, `r` restart, `e` edit, `b` backup, `n` new,
+  `F5` refresh, `?` help, `q` quit.
 
 List versions without opening the dashboard:
 
@@ -226,9 +230,11 @@ image tag is derived from the Minecraft version (`java8`, `java17`, `java21`,
 
 When `--loader-version` is omitted, `mchost new` resolves the recommended build
 from the loader's own metadata and writes that exact version. Existing
-instances can be changed from the dashboard's `Version` button, which lists
-Minecraft versions and every loader build with latest/recommended markers.
-The same data is available from the shell with `mchost versions`.
+instances can be changed from the dashboard's `Edit` button (`e`), which updates
+the display name, Java heap, Minecraft version, and loader build in one form.
+For local pack instances, the resolved versions are written back into the pack
+metadata so the generated compose file follows them. The same version data is
+available from the shell with `mchost versions`.
 
 ### One server at a time
 
@@ -245,8 +251,7 @@ the target.
 ### Memory
 
 The Java heap is stored as `MEMORY` in the generated compose file. Change it
-after creation from the dashboard (`m` or More → Change memory) or from the
-shell:
+after creation from the dashboard (`e` or **Edit instance**) or from the shell:
 
 ```bash
 mchost memory my-server 8G
@@ -531,8 +536,8 @@ For a guided reading order through the codebase, see
   command palette, right-click menus, and mouse actions.
 - **Phase 3 — versioning and new instances:** done. Live metadata providers for
   Mojang, PaperMC, Fabric, Quilt, NeoForge, and Forge; `mchost versions`; the
-  in-app Minecraft × loader picker; the new-instance wizard; recommended/latest
-  markers.
+  new-instance wizard with recommended/latest markers; and a combined
+  edit-instance form for name, memory, Minecraft version, and loader build.
 - **Phase 4 — operations:** done. Backups (world/full, RCON-safe, retention,
   restore), mod enable/disable/delete, in-app config editing, and instance
   deletion.

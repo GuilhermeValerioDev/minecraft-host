@@ -134,6 +134,24 @@ TabPane {
     height: 1fr;
 }
 
+#overview-pane {
+    height: 1fr;
+    padding: 1;
+}
+
+#overview {
+    height: auto;
+}
+
+#overview-actions {
+    height: 3;
+    padding-top: 1;
+}
+
+#edit-server-properties {
+    min-width: 24;
+}
+
 #console-pane {
     height: 1fr;
 }
@@ -169,6 +187,10 @@ TabPane {
     width: 1fr;
     content-align: left middle;
     color: $text-muted;
+}
+
+.file-filter {
+    width: 24;
 }
 
 .file-toolbar Button {
